@@ -12,7 +12,7 @@
     "next": "^14.2.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
-    "@anthropic-ai/sdk": "^0.34.0",
+    "@anthropic-ai/sdk": "^0.98.0",
     "lucide-react": "^0.383.0"
   },
   "devDependencies": {
