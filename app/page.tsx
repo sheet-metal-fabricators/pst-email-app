@@ -358,29 +358,96 @@ function ApiKeySettings({
 function UploadView({ onLoad }: { onLoad: (emails: EmailData[], name: string) => void }) {
   const [dragOver, setDragOver] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState("");
   const [error, setError] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const handleFile = useCallback(async (file: File) => {
-    if (!file) return;
+  const handleFiles = useCallback(async (fileList: FileList | File[]) => {
+    const files = Array.from(fileList);
+    if (!files.length) return;
     setError("");
 
-    if (!file.name.toLowerCase().endsWith(".json")) {
-      setError("Please upload a .json file extracted from your PST");
+    // Validate all files
+    for (const f of files) {
+      const name = f.name.toLowerCase();
+      if (!name.endsWith(".pst") && !name.endsWith(".json")) {
+        setError("Only .pst and .json files are accepted");
+        return;
+      }
+    }
+
+    // Check if any PST files (only 1 PST allowed, must be ≤50MB)
+    const pstFiles = files.filter((f) => f.name.toLowerCase().endsWith(".pst"));
+    const jsonFiles = files.filter((f) => f.name.toLowerCase().endsWith(".json"));
+
+    if (pstFiles.length > 0 && jsonFiles.length > 0) {
+      setError("Please upload either a .pst file OR .json files, not both");
+      return;
+    }
+
+    if (pstFiles.length > 1) {
+      setError("Only one .pst file can be uploaded at a time");
       return;
     }
 
     setLoading(true);
+
     try {
-      const text = await file.text();
-      const data: ParsedPST | EmailData[] = JSON.parse(text);
-      const emailList = Array.isArray(data) ? data : data.emails;
-      if (!Array.isArray(emailList) || emailList.length === 0) throw new Error("No emails found in JSON file");
-      onLoad(emailList, file.name);
+      if (pstFiles.length === 1) {
+        // Single PST upload
+        const file = pstFiles[0];
+        if (file.size > 50 * 1024 * 1024) {
+          throw new Error(
+            `PST file is ${(file.size / 1024 / 1024).toFixed(0)}MB — too large for direct upload (50MB max). ` +
+            `Run pst_extractor.py locally to convert it to JSON chunks, then upload those here.`
+          );
+        }
+        setProgress("Uploading PST file...");
+        const formData = new FormData();
+        formData.append("file", file);
+        setProgress("Parsing PST file — this may take a moment...");
+        const res = await fetch("/api/parse-pst", { method: "POST", body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to parse PST file");
+        if (!data.emails?.length) throw new Error("No emails found in PST file");
+        onLoad(data.emails, file.name);
+      } else {
+        // JSON files — could be single or multiple chunks
+        const allEmails: EmailData[] = [];
+        const sortedFiles = [...jsonFiles].sort((a, b) => a.name.localeCompare(b.name));
+
+        for (let i = 0; i < sortedFiles.length; i++) {
+          const file = sortedFiles[i];
+          setProgress(
+            sortedFiles.length > 1
+              ? `Loading chunk ${i + 1} of ${sortedFiles.length}: ${file.name}...`
+              : "Loading email data..."
+          );
+
+          const text = await file.text();
+          const data = JSON.parse(text);
+          const emailList: EmailData[] = Array.isArray(data) ? data : data.emails;
+
+          if (!Array.isArray(emailList)) {
+            throw new Error(`Invalid format in ${file.name} — expected an array of emails`);
+          }
+
+          allEmails.push(...emailList);
+        }
+
+        if (allEmails.length === 0) throw new Error("No emails found in the uploaded files");
+
+        const displayName = sortedFiles.length > 1
+          ? `${sortedFiles.length} chunks (${allEmails.length} emails)`
+          : sortedFiles[0].name;
+
+        onLoad(allEmails, displayName);
+      }
     } catch (e: any) {
-      setError(e.message || "Failed to parse file");
+      setError(e.message || "Failed to process file(s)");
     } finally {
       setLoading(false);
+      setProgress("");
     }
   }, [onLoad]);
 
@@ -395,7 +462,7 @@ function UploadView({ onLoad }: { onLoad: (emails: EmailData[], name: string) =>
           Search your <em className="text-amber-400">Outlook</em> archive
         </h1>
         <p className="text-ink-400 text-lg max-w-lg mx-auto leading-relaxed">
-          Upload extracted email data. Ask questions in natural language.
+          Upload your PST file or extracted JSON. Ask questions in natural language.
           Get instant answers powered by AI.
         </p>
       </div>
@@ -405,16 +472,16 @@ function UploadView({ onLoad }: { onLoad: (emails: EmailData[], name: string) =>
           ${dragOver ? "border-amber-400/60 bg-amber-400/5 scale-[1.01]" : "border-ink-700/40 hover:border-ink-600/60 bg-ink-900/30"}`}
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
-        onDrop={(e) => { e.preventDefault(); setDragOver(false); handleFile(e.dataTransfer.files[0]); }}
+        onDrop={(e) => { e.preventDefault(); setDragOver(false); handleFiles(e.dataTransfer.files); }}
         onClick={() => !loading && fileRef.current?.click()}
       >
-        <input ref={fileRef} type="file" accept=".json" className="hidden"
-          onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} />
+        <input ref={fileRef} type="file" accept=".pst,.json" multiple className="hidden"
+          onChange={(e) => e.target.files?.length && handleFiles(e.target.files)} />
         <div className="flex flex-col items-center gap-4 py-16 px-8">
           {loading ? (
             <>
               <Loader2 size={40} className="text-amber-400 animate-spin" />
-              <p className="text-ink-300 text-sm">Loading email data...</p>
+              <p className="text-ink-300 text-sm">{progress}</p>
             </>
           ) : (
             <>
@@ -422,9 +489,10 @@ function UploadView({ onLoad }: { onLoad: (emails: EmailData[], name: string) =>
                 <Upload size={24} className="text-ink-400" />
               </div>
               <div className="text-center">
-                <p className="text-ink-200 font-medium">Drop your JSON file here</p>
+                <p className="text-ink-200 font-medium">Drop your file(s) here</p>
                 <p className="text-ink-500 text-sm mt-1">
-                  Accepts <span className="text-amber-400/80 font-mono text-xs">.json</span> exported from pst_extractor.py
+                  <span className="text-amber-400/80 font-mono text-xs">.pst</span> (up to 50MB) or
+                  <span className="text-amber-400/80 font-mono text-xs ml-1">.json</span> chunks (select multiple)
                 </p>
               </div>
             </>
@@ -433,8 +501,8 @@ function UploadView({ onLoad }: { onLoad: (emails: EmailData[], name: string) =>
       </div>
 
       {error && (
-        <div className="mt-4 flex items-center gap-2 text-red-400/90 text-sm animate-fade-up">
-          <AlertCircle size={14} /> {error}
+        <div className="mt-4 flex items-center gap-2 text-red-400/90 text-sm animate-fade-up max-w-xl">
+          <AlertCircle size={14} className="flex-shrink-0" /> {error}
         </div>
       )}
 
@@ -451,13 +519,28 @@ function UploadView({ onLoad }: { onLoad: (emails: EmailData[], name: string) =>
         <div className="rounded-xl border border-ink-800/60 bg-ink-900/40 p-6">
           <h3 className="text-ink-300 text-sm font-semibold mb-3 flex items-center gap-2">
             <FileText size={14} className="text-amber-400/70" />
-            How to extract your PST emails
+            How it works
           </h3>
           <div className="space-y-3 text-ink-500 text-sm leading-relaxed">
-            <p><span className="text-ink-300 font-medium">1.</span> Download <code className="px-1.5 py-0.5 rounded bg-ink-800 text-amber-400/80 font-mono text-xs">pst_extractor.py</code> from the GitHub repo</p>
-            <p><span className="text-ink-300 font-medium">2.</span> Install: <code className="px-1.5 py-0.5 rounded bg-ink-800 text-amber-400/80 font-mono text-xs">pip install pypff</code></p>
-            <p><span className="text-ink-300 font-medium">3.</span> Run: <code className="px-1.5 py-0.5 rounded bg-ink-800 text-amber-400/80 font-mono text-xs">python3 pst_extractor.py your_mailbox.pst</code></p>
-            <p><span className="text-ink-300 font-medium">4.</span> Upload the generated .json file above</p>
+            <p>
+              <span className="text-ink-300 font-medium">Small PST files (&lt;50MB):</span>{" "}
+              Drop the <code className="px-1.5 py-0.5 rounded bg-ink-800 text-amber-400/80 font-mono text-xs">.pst</code> file
+              directly — parsed automatically in the browser.
+            </p>
+            <p>
+              <span className="text-ink-300 font-medium">Large PST files (&gt;50MB):</span>{" "}
+              Run the extractor locally to split into JSON chunks:
+            </p>
+            <div className="bg-ink-900/60 rounded-lg p-3 font-mono text-xs text-amber-400/80 space-y-1">
+              <p>pip install pypff</p>
+              <p>python3 pst_extractor.py your_file.pst</p>
+            </div>
+            <p>
+              Then <span className="text-ink-300 font-medium">select all</span> the generated
+              <code className="px-1.5 py-0.5 rounded bg-ink-800 text-amber-400/80 font-mono text-xs ml-1">_part001.json</code>,
+              <code className="px-1.5 py-0.5 rounded bg-ink-800 text-amber-400/80 font-mono text-xs ml-1">_part002.json</code>, ... files
+              and drop them here. They'll be merged automatically.
+            </p>
           </div>
         </div>
       </div>
