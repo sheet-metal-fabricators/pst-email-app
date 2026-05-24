@@ -36,7 +36,7 @@ function processFolder(folder: PSTFolder, folderPath: string, emails: ExtractedE
           for (let i = 0; i < numRecip; i++) {
             try {
               const r = email.getRecipient(i);
-              recipients.push(r.displayName || r.smtpAddress || "Unknown");
+              recipients.push(r?.displayName || r?.smtpAddress || "Unknown");
             } catch {
               // skip bad recipient
             }
