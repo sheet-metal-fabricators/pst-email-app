@@ -1,12 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { PSTFile, PSTFolder, PSTMessage } from "pst-extractor";
+import { PSTFile, PSTFolder, PSTMessage, PSTRecipient, PSTAttachment } from "pst-extractor";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
 export const maxDuration = 60;
-
-// Next.js 14 App Router: disable default body size limit
 export const dynamic = "force-dynamic";
 
 interface ExtractedEmail {
@@ -25,69 +23,57 @@ function processFolder(folder: PSTFolder, folderPath: string, emails: ExtractedE
   const folderName = folder.displayName || "Root";
   const currentPath = folderPath ? `${folderPath}/${folderName}` : folderName;
 
-  // Process emails in this folder
+  // Process emails
   if (folder.contentCount > 0) {
     let email: PSTMessage | null = folder.getNextChild();
     while (email != null) {
       try {
+        // Recipients
         const recipients: string[] = [];
         try {
-          const numRecip = email.numberOfRecipients;
-          for (let i = 0; i < numRecip; i++) {
+          for (let i = 0; i < email.numberOfRecipients; i++) {
             try {
-              const r = email.getRecipient(i);
-              recipients.push(r?.displayName || r?.smtpAddress || "Unknown");
-            } catch {
-              // skip bad recipient
-            }
+              const r: PSTRecipient | null = email.getRecipient(i);
+              if (r) {
+                recipients.push(r.smtpAddress || r.emailAddress || "Unknown");
+              }
+            } catch { /* skip */ }
           }
-        } catch {
-          // no recipients accessible
-        }
+        } catch { /* no recipients */ }
 
+        // Attachments
         const attachments: { name: string; size: number }[] = [];
         try {
-          const numAtt = email.numberOfAttachments;
-          for (let i = 0; i < numAtt; i++) {
+          for (let i = 0; i < email.numberOfAttachments; i++) {
             try {
-              const att = email.getAttachment(i);
-              attachments.push({
-                name: att.longFilename || att.filename || `attachment_${i}`,
-                size: att.attachSize || 0,
-              });
-            } catch {
-              // skip bad attachment
-            }
+              const att: PSTAttachment | null = email.getAttachment(i);
+              if (att) {
+                attachments.push({
+                  name: att.longFilename || att.filename || `attachment_${i}`,
+                  size: att.size || 0,
+                });
+              }
+            } catch { /* skip */ }
           }
-        } catch {
-          // no attachments accessible
-        }
+        } catch { /* no attachments */ }
 
+        // Body
         let body = "";
         try {
           body = email.body || "";
         } catch {
           try {
-            body = email.bodyHTML || "";
-            // Strip HTML tags
-            body = body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-          } catch {
-            body = "";
-          }
+            const html = email.bodyHTML || "";
+            body = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+          } catch { /* no body */ }
         }
 
+        // Date
         let dateStr = "";
         try {
-          const d = email.messageDeliveryTime;
+          const d = email.clientSubmitTime;
           if (d) dateStr = d.toISOString();
-        } catch {
-          try {
-            const d = email.clientSubmitTime;
-            if (d) dateStr = d.toISOString();
-          } catch {
-            // no date
-          }
-        }
+        } catch { /* no date */ }
 
         emails.push({
           subject: email.subject || "(No Subject)",
@@ -100,25 +86,22 @@ function processFolder(folder: PSTFolder, folderPath: string, emails: ExtractedE
           attachments,
           has_attachments: attachments.length > 0,
         });
-      } catch (e) {
+      } catch {
         // Skip problematic emails
-        console.error("Skipping email:", e);
       }
 
       email = folder.getNextChild();
     }
   }
 
-  // Recurse into subfolders
+  // Recurse subfolders
   if (folder.hasSubfolders) {
     try {
-      const subfolders = folder.getSubFolders();
-      for (const sub of subfolders) {
+      const subs = folder.getSubFolders();
+      for (const sub of subs) {
         processFolder(sub, currentPath, emails);
       }
-    } catch {
-      // skip inaccessible subfolders
-    }
+    } catch { /* skip */ }
   }
 }
 
@@ -137,11 +120,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Only .pst files are accepted" }, { status: 400 });
     }
 
-    // Size check (50MB limit for serverless)
     const MAX_SIZE = 50 * 1024 * 1024;
     if (file.size > MAX_SIZE) {
       return NextResponse.json(
-        { error: `File too large (${(file.size / 1024 / 1024).toFixed(0)}MB). Max 50MB for direct upload. For larger files, use pst_extractor.py locally and upload the JSON.` },
+        { error: `File too large (${(file.size / 1024 / 1024).toFixed(0)}MB). Max 50MB. Use pst_extractor.py locally for larger files.` },
         { status: 413 }
       );
     }
@@ -151,16 +133,14 @@ export async function POST(req: NextRequest) {
     tmpPath = path.join(os.tmpdir(), `pst_${Date.now()}_${Math.random().toString(36).slice(2)}.pst`);
     fs.writeFileSync(tmpPath, buffer);
 
-    // Parse PST
     const pstFile = new PSTFile(tmpPath);
     const emails: ExtractedEmail[] = [];
-
     processFolder(pstFile.getRootFolder(), "", emails);
 
     // Sort by date descending
     emails.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
 
-    // Build folder stats
+    // Folder stats
     const folders: Record<string, number> = {};
     for (const e of emails) {
       const f = e.folder || "Unknown";
@@ -180,13 +160,8 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   } finally {
-    // Clean up temp file
     if (tmpPath) {
-      try {
-        fs.unlinkSync(tmpPath);
-      } catch {
-        // ignore
-      }
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
     }
   }
 }
